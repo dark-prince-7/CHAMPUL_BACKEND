@@ -1,18 +1,30 @@
 const { Sequelize } = require('sequelize');
 
-// PostgreSQL database configuration
-const sequelize = new Sequelize('champul_game', 'postgres', 'postgres', {
-  host: 'localhost',
-  port: 5432,
-  dialect: 'postgres',
-  logging: false,
-  pool: {
-    max: 5,
-    min: 0,
-    acquire: 30000,
-    idle: 10000
-  }
-});
+// Implement global singleton to prevent multiple instances on some environments (like Windows drive casing issues)
+if (!global._sequelize) {
+  global._sequelize = new Sequelize(
+    process.env.DB_NAME || 'champul_game',
+    process.env.DB_USER || 'postgres',
+    process.env.DB_PASSWORD || 'postgres',
+    {
+      host: process.env.DB_HOST || 'localhost',
+      port: parseInt(process.env.DB_PORT) || 5432,
+      dialect: 'postgres',
+      logging: false,
+      pool: {
+        max: 5,
+        min: 0,
+        acquire: 30000,
+        idle: 10000
+      }
+    }
+  );
+  console.log('--- Initialized NEW global sequelize instance');
+} else {
+  console.log('--- Using EXISTING global sequelize instance');
+}
+
+const sequelize = global._sequelize;
 
 // Track if database is available
 let databaseAvailable = false;

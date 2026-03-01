@@ -2,7 +2,7 @@ const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/database');
 
 // Friendship model for managing friend relationships
-const Friendship = sequelize.define('Friendship', {
+const Friendship = sequelize.isDefined('Friendship') ? sequelize.model('Friendship') : sequelize.define('Friendship', {
   id: {
     type: DataTypes.UUID,
     defaultValue: DataTypes.UUIDV4,

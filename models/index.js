@@ -1,17 +1,15 @@
 const { sequelize, isDatabaseAvailable } = require('../config/database');
-const Player = require('./Player');
+
+const UserPlayer = require('./Player');
 const Match = require('./Match');
 const Friendship = require('./Friendship');
+const StoreItem = require('./StoreItem');
+const PlayerItem = require('./PlayerItem');
+const MatchHistory = require('./MatchHistory');
 
-// Set up associations
-Player.hasMany(Match, { foreignKey: 'winner_id', as: 'wins' });
-Match.belongsTo(Player, { foreignKey: 'winner_id', as: 'winner' });
-
-// Friendship associations
-Player.hasMany(Friendship, { foreignKey: 'requester_id', as: 'sentRequests' });
-Player.hasMany(Friendship, { foreignKey: 'addressee_id', as: 'receivedRequests' });
-Friendship.belongsTo(Player, { foreignKey: 'requester_id', as: 'requester' });
-Friendship.belongsTo(Player, { foreignKey: 'addressee_id', as: 'addressee' });
+// Initialize associations function
+const setupAssociations = require('./associations');
+setupAssociations();
 
 // Sync all models with database
 const syncDatabase = async () => {
@@ -19,11 +17,10 @@ const syncDatabase = async () => {
     console.log('⚠ Skipping database sync - database not available');
     return;
   }
-  
+
   try {
-    // Use basic sync to avoid ALTER TABLE issues with UNIQUE constraints
-    // This creates tables if they don't exist but won't modify existing ones
-    await sequelize.sync();
+    setupAssociations();
+    await sequelize.sync({ alter: true });
     console.log('✓ Database models synchronized successfully.');
   } catch (error) {
     console.error('✗ Error synchronizing database:', error.message);
@@ -32,9 +29,12 @@ const syncDatabase = async () => {
 
 module.exports = {
   sequelize,
-  Player,
+  Player: UserPlayer,
   Match,
   Friendship,
+  StoreItem,
+  PlayerItem,
+  MatchHistory,
   syncDatabase,
   isDatabaseAvailable
 };

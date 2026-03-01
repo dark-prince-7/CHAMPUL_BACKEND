@@ -7,7 +7,11 @@ const { testConnection } = require('./config/database');
 const { syncDatabase } = require('./models');
 const authRoutes = require('./routes/auth');
 const roomRoutes = require('./routes/room');
+const storeRoutes = require('./routes/store');
 const { setupGameSocket } = require('./sockets/gameSocket');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const errorHandler = require('./middleware/errorHandler');
 
 // Initialize Express app
 const app = express();
@@ -17,7 +21,7 @@ const server = http.createServer(app);
 const rooms = {};
 
 // Get CORS origins from environment
-const corsOrigins = process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : ['http://localhost:5173'];
+const corsOrigins = process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : ['http://localhost:5174'];
 
 // Initialize Socket.IO with CORS
 const io = new Server(server, {
@@ -29,11 +33,22 @@ const io = new Server(server, {
 });
 
 // Middleware
+app.use(helmet()); // Secure HTTP headers
 app.use(cors({
   origin: corsOrigins,
   credentials: true
 }));
 app.use(express.json());
+
+// Main App Rate Limiting
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 200, // limit each IP to 200 requests per windowMs
+  message: 'Too many requests from this IP, please try again after 15 minutes',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/', apiLimiter);
 
 // Share rooms with room routes
 roomRoutes.setRooms(rooms);
@@ -41,11 +56,15 @@ roomRoutes.setRooms(rooms);
 // Routes
 app.use('/', authRoutes);
 app.use('/', roomRoutes);
+app.use('/', storeRoutes);
+
+// Centralized Error Handling
+app.use(errorHandler);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     game: 'CHAMPUL',
     version: '1.0.0',
     timestamp: new Date().toISOString()
@@ -84,7 +103,7 @@ const startServer = async () => {
   try {
     // Test database connection
     await testConnection();
-    
+
     // Sync database models
     await syncDatabase();
 

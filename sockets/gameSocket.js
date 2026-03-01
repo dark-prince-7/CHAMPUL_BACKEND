@@ -20,18 +20,18 @@ const getRoom = (rooms, roomCode) => rooms[roomCode?.toUpperCase()];
 const getNextAvailableColor = (players) => {
   const playerCount = players.length;
   const usedColors = players.map(p => p.color);
-  
+
   const colorPatterns = {
     0: 'red',
     1: 'yellow',
     2: 'green',
     3: 'blue'
   };
-  
+
   if (playerCount === 1 && usedColors.includes('red')) {
     return 'yellow';
   }
-  
+
   return colorPatterns[playerCount] || 'red';
 };
 
@@ -386,7 +386,8 @@ const setupGameSocket = (io, rooms) => {
         color,
         ready: true,
         connected: true,
-        isAi: !!isAi
+        isAi: !!isAi,
+        equippedItems: { board: 'b01', cowrie: 'c01', piece: 'p01' }
       });
 
       emitRoomPlayers(io, room);
@@ -408,7 +409,8 @@ const setupGameSocket = (io, rooms) => {
         color,
         ready: true,
         connected: true,
-        isAi: true
+        isAi: true,
+        equippedItems: { board: 'b01', cowrie: 'c01', piece: 'p01' }
       });
 
       emitRoomPlayers(io, room);
@@ -489,10 +491,15 @@ const setupGameSocket = (io, rooms) => {
 
       const actingPlayerId = hostOverride ? current.id : playerId;
       const validMoves = getValidMoves(room.gameState, actingPlayerId, roll.move);
-      const chosen = validMoves.find(move => move.tokenIndex === tokenIndex && (!action || move.action === action));
-      if (!chosen) return;
 
-      const result = applyMove(room.gameState, actingPlayerId, tokenIndex, roll.move, chosen.action);
+      const targetIndex = Number(tokenIndex);
+      const chosen = validMoves.find(move => move.tokenIndex === targetIndex && (!action || move.action === action));
+
+      if (!chosen) {
+        return;
+      }
+
+      const result = applyMove(room.gameState, actingPlayerId, targetIndex, roll.move, chosen.action);
       if (!result) return;
 
       const earnedExtraTurn = roll.extraTurn || result.capturedTokens.length > 0 || result.finishedNow;
@@ -592,11 +599,11 @@ const setupGameSocket = (io, rooms) => {
               });
 
               // Count remaining active human players (non-forfeited, non-AI)
-              const activeHumans = room.gameState?.players?.filter(p => 
+              const activeHumans = room.gameState?.players?.filter(p =>
                 p.connected !== false && !p.forfeited && !p.isAi
               ) || [];
               // Count all remaining active players (humans + AI)
-              const activeAll = room.gameState?.players?.filter(p => 
+              const activeAll = room.gameState?.players?.filter(p =>
                 !p.forfeited && (p.isAi || p.connected !== false)
               ) || [];
 
@@ -629,32 +636,26 @@ const setupGameSocket = (io, rooms) => {
         if (wasHost) {
           const newHost = room.players.find(p => p.id !== playerId && !p.isAi && p.connected !== false);
           if (newHost) {
-            console.log(`[Host Transfer] ${username} left, transferring host to ${newHost.username}`);
             room.hostId = newHost.id;
             io.to(room.code).emit('hostTransferred', {
               newHostId: newHost.id,
               newHostUsername: newHost.username
             });
-          } else {
-            console.log(`[Host Transfer] ${username} left, no eligible new host found`);
           }
         }
       } else {
         // Before game starts, fully remove from room
         room.players = room.players.filter(p => p.id !== playerId);
-        
+
         // Host transfer in lobby: assign to first remaining non-AI player
         if (wasHost && room.players.length > 0) {
           const newHost = room.players.find(p => !p.isAi);
           if (newHost) {
-            console.log(`[Host Transfer Lobby] ${username} left, transferring host to ${newHost.username}`);
             room.hostId = newHost.id;
             io.to(room.code).emit('hostTransferred', {
               newHostId: newHost.id,
               newHostUsername: newHost.username
             });
-          } else {
-            console.log(`[Host Transfer Lobby] ${username} left, no eligible new host found`);
           }
         }
       }
@@ -695,24 +696,18 @@ const setupGameSocket = (io, rooms) => {
 
     // Rejoin active game within 60 seconds
     socket.on('rejoinGame', ({ roomCode, playerId }) => {
-      console.log(`[Rejoin Game] Request from ${playerId} for room ${roomCode}`);
       const room = getRoom(rooms, roomCode);
       if (!room || !room.gameStarted) {
-        console.log('[Rejoin Game] Failed: Room not found or game not started');
         return;
       }
 
       const player = room.players.find(p => p.id === playerId);
       if (!player) {
-        console.log('[Rejoin Game] Failed: Player not found in room');
         return;
       }
       if (player.forfeited) {
-        console.log('[Rejoin Game] Failed: Player already forfeited');
         return; // Too late, already forfeited
       }
-
-      console.log(`[Rejoin Game] Success: ${player.username} rejoining`);
 
       // Clear forfeit timer
       if (player._rejoinTimer) {
