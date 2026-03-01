@@ -58,18 +58,52 @@ const emitGameState = (io, room) => {
   });
 };
 
+// ── XP Calculation ──
+// XP is ONLY awarded in online multiplayer games (not offline / vs computer)
+// Victory: 50 XP | Capture a piece: 5 XP | Finish a piece (reach home): 10 XP
+const XP_VICTORY = 50;
+const XP_PER_CAPTURE = 5;
+const XP_PER_FINISH = 10;
+
+// Calculate XP earned by a specific player from game stats
+const calculatePlayerXp = (playerId, room, isWinner) => {
+  // No XP for offline / vs-computer games
+  if (room.isOffline) return { total: 0, breakdown: null };
+
+  const stats = room.gameStats?.[playerId] || { captures: 0, finishes: 0 };
+  const victoryXp = isWinner ? XP_VICTORY : 0;
+  const captureXp = stats.captures * XP_PER_CAPTURE;
+  const finishXp = stats.finishes * XP_PER_FINISH;
+  const total = victoryXp + captureXp + finishXp;
+
+  return {
+    total,
+    breakdown: {
+      victory: victoryXp,
+      captures: { count: stats.captures, xp: captureXp },
+      finishes: { count: stats.finishes, xp: finishXp },
+      total
+    }
+  };
+};
+
 // Record victory and losses in database
 const recordVictory = async (winner, room) => {
-  if (!isDatabaseAvailable()) return;
+  if (!isDatabaseAvailable()) return {};
+  const xpResults = {};
   try {
     const player = await Player.findByPk(winner.id);
-    if (!player) return;
+    if (!player) return xpResults;
 
     player.total_games += 1;
     if (room.isOffline) {
       player.wins_vs_computer += 1;
     } else {
       player.wins_vs_players += 1;
+      // Award XP to winner (online games only)
+      const { total, breakdown } = calculatePlayerXp(winner.id, room, true);
+      player.xp = (player.xp || 0) + total;
+      xpResults[winner.id] = { xpEarned: total, newXp: player.xp, newRank: player.rank, newLevel: player.level, breakdown };
     }
     await player.save();
 
@@ -85,6 +119,10 @@ const recordVictory = async (winner, room) => {
             otherPlayer.losses_vs_computer += 1;
           } else {
             otherPlayer.losses_vs_players += 1;
+            // Award XP for captures/finishes even to losers (online only)
+            const { total, breakdown } = calculatePlayerXp(p.id, room, false);
+            otherPlayer.xp = (otherPlayer.xp || 0) + total;
+            xpResults[p.id] = { xpEarned: total, newXp: otherPlayer.xp, newRank: otherPlayer.rank, newLevel: otherPlayer.level, breakdown };
           }
           await otherPlayer.save();
         }
@@ -93,6 +131,7 @@ const recordVictory = async (winner, room) => {
   } catch (error) {
     console.error('Error recording victory:', error.message);
   }
+  return xpResults;
 };
 
 const maybeHandleAiTurn = (io, room) => {
@@ -128,10 +167,16 @@ const maybeHandleAiTurn = (io, room) => {
     }
 
     // Step 2: Wait before making move (1.5s)
-    setTimeout(() => {
+    setTimeout(async () => {
       const chosen = chooseAiMove(validMoves, room.gameState, current.id);
       const result = applyMove(room.gameState, current.id, chosen.tokenIndex, roll.move, chosen.action);
       if (!result) return;
+
+      // Track stats for XP calculation (AI turn)
+      if (room.gameStats?.[current.id]) {
+        if (result.capturedTokens?.length) room.gameStats[current.id].captures += result.capturedTokens.length;
+        if (result.finishedNow) room.gameStats[current.id].finishes += 1;
+      }
 
       const earnedExtraTurn = roll.extraTurn || result.capturedTokens.length > 0 || result.finishedNow;
 
@@ -148,11 +193,12 @@ const maybeHandleAiTurn = (io, room) => {
       });
 
       if (result.winner) {
+        const xpResults = await recordVictory(result.winner, room);
         io.to(room.code).emit('gameOver', {
           winner: result.winner,
-          gameState: buildPublicGameState(room.gameState)
+          gameState: buildPublicGameState(room.gameState),
+          xpResults
         });
-        recordVictory(result.winner, room);
         return;
       }
 
@@ -438,6 +484,11 @@ const setupGameSocket = (io, rooms) => {
 
       room.gameStarted = true;
       room.gameState = createGameState(room.players);
+      // Initialize per-player game stats for XP tracking
+      room.gameStats = {};
+      room.players.forEach(p => {
+        room.gameStats[p.id] = { captures: 0, finishes: 0 };
+      });
 
       emitGameState(io, room);
       maybeHandleAiTurn(io, room);
@@ -477,7 +528,7 @@ const setupGameSocket = (io, rooms) => {
       }
     });
 
-    socket.on('moveToken', ({ roomCode, playerId, tokenIndex, action }) => {
+    socket.on('moveToken', async ({ roomCode, playerId, tokenIndex, action }) => {
       const room = getRoom(rooms, roomCode);
       if (!room || !room.gameState) return;
       if (room.gamePaused) return; // Game is paused waiting for rejoin
@@ -502,6 +553,12 @@ const setupGameSocket = (io, rooms) => {
       const result = applyMove(room.gameState, actingPlayerId, targetIndex, roll.move, chosen.action);
       if (!result) return;
 
+      // Track stats for XP calculation (human move)
+      if (room.gameStats?.[actingPlayerId]) {
+        if (result.capturedTokens?.length) room.gameStats[actingPlayerId].captures += result.capturedTokens.length;
+        if (result.finishedNow) room.gameStats[actingPlayerId].finishes += 1;
+      }
+
       const earnedExtraTurn = roll.extraTurn || result.capturedTokens.length > 0 || result.finishedNow;
       room.gameState.lastRoll = null;
 
@@ -518,11 +575,12 @@ const setupGameSocket = (io, rooms) => {
       });
 
       if (result.winner) {
+        const xpResults = await recordVictory(result.winner, room);
         io.to(room.code).emit('gameOver', {
           winner: result.winner,
-          gameState: buildPublicGameState(room.gameState)
+          gameState: buildPublicGameState(room.gameState),
+          xpResults
         });
-        recordVictory(result.winner, room);
         return;
       }
 
@@ -610,11 +668,13 @@ const setupGameSocket = (io, rooms) => {
               // If only 1 human left (regardless of AI), or only AI left - declare winner
               if (activeHumans.length <= 1 && activeHumans.length > 0) {
                 const lastPlayer = activeHumans[0];
-                io.to(room.code).emit('gameOver', {
-                  winner: lastPlayer,
-                  gameState: buildPublicGameState(room.gameState)
+                recordVictory(lastPlayer, room).then(xpResults => {
+                  io.to(room.code).emit('gameOver', {
+                    winner: lastPlayer,
+                    gameState: buildPublicGameState(room.gameState),
+                    xpResults
+                  });
                 });
-                recordVictory(lastPlayer, room);
               } else if (activeAll.length > 1) {
                 // >2 players remaining: skip forfeited player's turns and continue
                 const current = getCurrentPlayer(room.gameState);
