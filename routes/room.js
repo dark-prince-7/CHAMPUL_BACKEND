@@ -68,13 +68,13 @@ router.post('/create-room', async (req, res) => {
       try {
         const items = await PlayerItem.findAll({
           where: { player_id: playerId, equipped: true },
-          include: [{ model: StoreItem, as: 'item' }]
+          include: [{ model: StoreItem, as: 'store_item' }]
         });
         items.forEach(pi => {
-          if (pi.item && pi.item.category) {
-            if (pi.item.category === 'boards') equippedItems.board = pi.item_id;
-            if (pi.item.category === 'cowries') equippedItems.cowrie = pi.item_id;
-            if (pi.item.category === 'pieces') equippedItems.piece = pi.item_id;
+          if (pi.store_item && pi.store_item.category) {
+            if (pi.store_item.category === 'board') equippedItems.board = pi.item_id;
+            if (pi.store_item.category === 'cowrie') equippedItems.cowrie = pi.item_id;
+            if (pi.store_item.category === 'piece') equippedItems.piece = pi.item_id;
           }
         });
       } catch (e) {
@@ -189,13 +189,13 @@ router.post('/join-room', async (req, res) => {
       try {
         const items = await PlayerItem.findAll({
           where: { player_id: playerId, equipped: true },
-          include: [{ model: StoreItem, as: 'item' }]
+          include: [{ model: StoreItem, as: 'store_item' }]
         });
         items.forEach(pi => {
-          if (pi.item && pi.item.category) {
-            if (pi.item.category === 'boards') equippedItems.board = pi.item_id;
-            if (pi.item.category === 'cowries') equippedItems.cowrie = pi.item_id;
-            if (pi.item.category === 'pieces') equippedItems.piece = pi.item_id;
+          if (pi.store_item && pi.store_item.category) {
+            if (pi.store_item.category === 'board') equippedItems.board = pi.item_id;
+            if (pi.store_item.category === 'cowrie') equippedItems.cowrie = pi.item_id;
+            if (pi.store_item.category === 'piece') equippedItems.piece = pi.item_id;
           }
         });
       } catch (e) {
