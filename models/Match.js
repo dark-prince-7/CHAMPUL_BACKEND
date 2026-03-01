@@ -2,7 +2,7 @@ const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/database');
 
 // Match model for storing completed games
-const Match = sequelize.define('Match', {
+const Match = sequelize.isDefined('Match') ? sequelize.model('Match') : sequelize.define('Match', {
   id: {
     type: DataTypes.UUID,
     defaultValue: DataTypes.UUIDV4,

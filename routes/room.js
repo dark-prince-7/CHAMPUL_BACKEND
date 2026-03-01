@@ -1,5 +1,6 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
+const { PlayerItem, StoreItem, isDatabaseAvailable } = require('../models');
 
 const router = express.Router();
 
@@ -21,23 +22,23 @@ const generateRoomCode = () => {
 const getNextPlayerColor = (existingPlayers) => {
   const playerCount = existingPlayers.length;
   const usedColors = existingPlayers.map(p => p.color);
-  
+
   const colorPatterns = {
     0: 'red',
     1: 'yellow',
     2: 'green',
     3: 'blue'
   };
-  
+
   if (playerCount === 1 && usedColors.includes('red')) {
     return 'yellow';
   }
-  
+
   return colorPatterns[playerCount] || 'red';
 };
 
 // POST /create-room - Create a new game room (requires login)
-router.post('/create-room', (req, res) => {
+router.post('/create-room', async (req, res) => {
   try {
     const { playerId, username, isOffline, passcode } = req.body;
 
@@ -61,6 +62,26 @@ router.post('/create-room', (req, res) => {
       roomCode = generateRoomCode();
     }
 
+    // Fetch equipped items from DB
+    let equippedItems = { board: 'b01', cowrie: 'c01', piece: 'p01' };
+    if (isDatabaseAvailable() && !playerId.startsWith('guest-')) {
+      try {
+        const items = await PlayerItem.findAll({
+          where: { player_id: playerId, equipped: true },
+          include: [{ model: StoreItem, as: 'item' }]
+        });
+        items.forEach(pi => {
+          if (pi.item && pi.item.category) {
+            if (pi.item.category === 'boards') equippedItems.board = pi.item_id;
+            if (pi.item.category === 'cowries') equippedItems.cowrie = pi.item_id;
+            if (pi.item.category === 'pieces') equippedItems.piece = pi.item_id;
+          }
+        });
+      } catch (e) {
+        console.error('Failed to fetch equipped items for host:', e);
+      }
+    }
+
     rooms[roomCode] = {
       id: uuidv4(),
       code: roomCode,
@@ -72,7 +93,8 @@ router.post('/create-room', (req, res) => {
         username,
         color: 'red',
         ready: false,
-        connected: true
+        connected: true,
+        equippedItems // Inject equipped items into player object
       }],
       maxPlayers: 4,
       gameStarted: false,
@@ -102,7 +124,7 @@ router.post('/create-room', (req, res) => {
 });
 
 // POST /join-room - Join an existing game room (requires passcode)
-router.post('/join-room', (req, res) => {
+router.post('/join-room', async (req, res) => {
   try {
     const { playerId, username, roomCode, passcode } = req.body;
 
@@ -161,12 +183,33 @@ router.post('/join-room', (req, res) => {
 
     const playerColor = getNextPlayerColor(room.players);
 
+    // Fetch equipped items from DB
+    let equippedItems = { board: 'b01', cowrie: 'c01', piece: 'p01' };
+    if (isDatabaseAvailable() && !playerId.startsWith('guest-')) {
+      try {
+        const items = await PlayerItem.findAll({
+          where: { player_id: playerId, equipped: true },
+          include: [{ model: StoreItem, as: 'item' }]
+        });
+        items.forEach(pi => {
+          if (pi.item && pi.item.category) {
+            if (pi.item.category === 'boards') equippedItems.board = pi.item_id;
+            if (pi.item.category === 'cowries') equippedItems.cowrie = pi.item_id;
+            if (pi.item.category === 'pieces') equippedItems.piece = pi.item_id;
+          }
+        });
+      } catch (e) {
+        console.error('Failed to fetch equipped items for joining player:', e);
+      }
+    }
+
     room.players.push({
       id: playerId,
       username,
       color: playerColor,
       ready: false,
-      connected: true
+      connected: true,
+      equippedItems // Inject equipped items into player object
     });
 
     res.json({
