@@ -78,7 +78,23 @@ exports.register = async (req, res) => {
             message: 'Registration successful',
             data: {
                 token,
-                player: { id: player.id, username: player.username, profile_id: player.profile_id, coins: player.coins, gems: player.gems }
+                player: {
+                    id: player.id,
+                    username: player.username,
+                    profile_id: player.profile_id,
+                    coins: player.coins,
+                    gems: player.gems,
+                    xp: player.xp || 0,
+                    level: player.level || 1,
+                    rank: player.rank || 'Bronze I',
+                    wins_vs_computer: 0,
+                    losses_vs_computer: 0,
+                    wins_vs_players: 0,
+                    losses_vs_players: 0,
+                    total_games: 0,
+                    avatar_color: player.avatar_color || 'red',
+                    claimed_rank_rewards: player.claimed_rank_rewards || []
+                }
             }
         });
 
@@ -123,7 +139,23 @@ exports.login = async (req, res) => {
             message: 'Login successful',
             data: {
                 token,
-                player: { id: player.id, username: player.username, coins: player.coins, gems: player.gems, profile_id: player.profile_id }
+                player: {
+                    id: player.id,
+                    username: player.username,
+                    profile_id: player.profile_id,
+                    coins: player.coins,
+                    gems: player.gems,
+                    xp: player.xp || 0,
+                    level: player.level || 1,
+                    rank: player.rank || 'Bronze I',
+                    wins_vs_computer: player.wins_vs_computer || 0,
+                    losses_vs_computer: player.losses_vs_computer || 0,
+                    wins_vs_players: player.wins_vs_players || 0,
+                    losses_vs_players: player.losses_vs_players || 0,
+                    total_games: player.total_games || 0,
+                    avatar_color: player.avatar_color || 'red',
+                    claimed_rank_rewards: player.claimed_rank_rewards || []
+                }
             }
         });
 
@@ -353,6 +385,73 @@ exports.removeFriend = async (req, res) => {
     } catch (error) {
         console.error('Remove friend error:', error);
         res.status(500).json({ success: false, message: 'Failed to remove friend', data: null });
+    }
+};
+
+// Rank XP thresholds and rewards — stageIIIXp = XP required to reach the 3rd stage of each rank
+// Must mirror rank.stages[2].xp in RanksPage.jsx
+const RANK_REWARDS = {
+    bronze:      { stageIIIXp: 3000,    coins: 500,     gems: 0     },
+    silver:      { stageIIIXp: 11000,   coins: 1500,    gems: 50    },
+    gold:        { stageIIIXp: 27000,   coins: 5000,    gems: 150   },
+    platinum:    { stageIIIXp: 55000,   coins: 10000,   gems: 300   },
+    diamond:     { stageIIIXp: 91000,   coins: 25000,   gems: 750   },
+    sapphire:    { stageIIIXp: 138000,  coins: 50000,   gems: 1500  },
+    elite:       { stageIIIXp: 201000,  coins: 100000,  gems: 3000  },
+    master:      { stageIIIXp: 291000,  coins: 200000,  gems: 5000  },
+    grandmaster: { stageIIIXp: 425000,  coins: 500000,  gems: 10000 },
+    legendary:   { stageIIIXp: 625000,  coins: 1000000, gems: 25000 },
+    shellmaster: { stageIIIXp: 1000000, coins: 2500000, gems: 50000 },
+};
+
+exports.claimRankReward = async (req, res) => {
+    if (!isDatabaseAvailable()) {
+        return res.status(503).json({ success: false, message: 'Database not available' });
+    }
+    try {
+        const { rankId } = req.body;
+        const playerId = req.user.id;
+
+        const rankData = RANK_REWARDS[rankId];
+        if (!rankData) {
+            return res.status(400).json({ success: false, message: 'Invalid rank ID' });
+        }
+
+        const player = await Player.findByPk(playerId);
+        if (!player) {
+            return res.status(404).json({ success: false, message: 'Player not found' });
+        }
+
+        const playerXp = player.xp || 0;
+        if (playerXp < rankData.stageIIIXp) {
+            return res.status(400).json({ success: false, message: `Complete ${rankId} Stage III first (need ${rankData.stageIIIXp.toLocaleString()} XP, you have ${playerXp.toLocaleString()})` });
+        }
+
+        // Check if already claimed (get() virtual returns parsed array)
+        const alreadyClaimed = player.claimed_rank_rewards || [];
+        if (alreadyClaimed.includes(rankId)) {
+            return res.status(400).json({ success: false, message: 'Reward already claimed for this rank' });
+        }
+
+        // Credit the rewards
+        player.coins = (player.coins || 0) + rankData.coins;
+        player.gems  = (player.gems  || 0) + rankData.gems;
+        player.claimed_rank_rewards = [...alreadyClaimed, rankId];
+        await player.save();
+
+        res.json({
+            success: true,
+            message: `${rankId.charAt(0).toUpperCase() + rankId.slice(1)} rank reward claimed!`,
+            data: {
+                coins: player.coins,
+                gems:  player.gems,
+                claimedRankRewards: player.claimed_rank_rewards,
+                rewarded: { coins: rankData.coins, gems: rankData.gems }
+            }
+        });
+    } catch (error) {
+        console.error('Claim rank reward error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error' });
     }
 };
 

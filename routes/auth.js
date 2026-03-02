@@ -55,4 +55,10 @@ router.delete('/friends/:friendshipId', [
 router.get('/history/:id', authenticateToken, authController.getHistory);
 router.get('/leaderboard', authController.getLeaderboard);
 
+// Rank reward claiming
+router.post('/claim-rank-reward', [
+  authenticateToken,
+  body('rankId').isString().notEmpty().withMessage('Invalid rank ID')
+], validateRequest, authController.claimRankReward);
+
 module.exports = router;

@@ -11,13 +11,11 @@ const UserPlayer = sequelize.isDefined('UserPlayer') ? sequelize.model('UserPlay
   profile_id: {
     type: DataTypes.STRING(8),
     allowNull: true,
-    unique: true,
     comment: '8-digit unique profile ID for friend search'
   },
   username: {
     type: DataTypes.STRING(50),
     allowNull: false,
-    unique: true,
     validate: {
       len: [3, 50]
     }
@@ -60,6 +58,18 @@ const UserPlayer = sequelize.isDefined('UserPlayer') ? sequelize.model('UserPlay
     type: DataTypes.INTEGER,
     defaultValue: 100,
     comment: 'Premium currency'
+  },
+  claimed_rank_rewards: {
+    type: DataTypes.TEXT,
+    defaultValue: '[]',
+    comment: 'JSON array of rank IDs whose rewards have been claimed by this player',
+    get() {
+      const raw = this.getDataValue('claimed_rank_rewards');
+      try { return JSON.parse(raw || '[]'); } catch { return []; }
+    },
+    set(val) {
+      this.setDataValue('claimed_rank_rewards', JSON.stringify(Array.isArray(val) ? val : []));
+    }
   },
   xp: {
     type: DataTypes.INTEGER,
@@ -151,7 +161,11 @@ const UserPlayer = sequelize.isDefined('UserPlayer') ? sequelize.model('UserPlay
   tableName: 'players',
   timestamps: true,
   createdAt: 'created_at',
-  updatedAt: 'updated_at'
+  updatedAt: 'updated_at',
+  indexes: [
+    { unique: true, fields: ['username'] },
+    { unique: true, fields: ['profile_id'] }
+  ]
 });
 
 module.exports = UserPlayer;

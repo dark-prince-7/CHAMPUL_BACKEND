@@ -261,6 +261,7 @@ const advanceTurn = (gameState) => {
 };
 
 const buildPublicGameState = (gameState) => {
+  if (!gameState) return null;
   return {
     ...gameState,
     players: gameState.players.map(p => ({

@@ -8,6 +8,7 @@ const router = express.Router();
 
 router.get('/store', storeController.getStoreItems);
 router.get('/collection/:playerId', authenticateToken, storeController.getCollection);
+router.get('/purchases/:playerId', authenticateToken, storeController.getPurchaseHistory);
 
 router.post('/store/buy', [
     authenticateToken,
