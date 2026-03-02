@@ -37,6 +37,21 @@ const MatchHistory = sequelize.isDefined('MatchHistory') ? sequelize.model('Matc
     xp_gained: {
         type: DataTypes.INTEGER,
         defaultValue: 0
+    },
+    captures: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0,
+        comment: 'Number of opponent pieces captured during the match'
+    },
+    finishes: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0,
+        comment: 'Number of own pieces that reached home during the match'
+    },
+    players_count: {
+        type: DataTypes.INTEGER,
+        defaultValue: 2,
+        comment: 'Number of players in the match (2-4)'
     }
 }, {
     tableName: 'match_history',

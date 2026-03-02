@@ -21,7 +21,7 @@ const server = http.createServer(app);
 const rooms = {};
 
 // Get CORS origins from environment
-const corsOrigins = process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : ['http://localhost:5174'];
+const corsOrigins = process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : ['http://localhost:5174','http://10.199.3.184:5173'];
 
 // Initialize Socket.IO with CORS
 const io = new Server(server, {

@@ -14,6 +14,7 @@ module.exports = () => {
     const StoreItem = sequelize.model('StoreItem');
     const PlayerItem = sequelize.model('PlayerItem');
     const MatchHistory = sequelize.model('MatchHistory');
+    const PurchaseHistory = sequelize.model('PurchaseHistory');
 
     // Match/UserPlayer associations
     UserPlayer.hasMany(Match, { foreignKey: 'winner_id', as: 'wins' });
@@ -35,6 +36,12 @@ module.exports = () => {
 
     StoreItem.hasMany(PlayerItem, { foreignKey: 'item_id' });
     PlayerItem.belongsTo(StoreItem, { foreignKey: 'item_id', as: 'store_item' });
+
+    // Purchase history associations
+    UserPlayer.hasMany(PurchaseHistory, { foreignKey: 'player_id', as: 'purchases' });
+    PurchaseHistory.belongsTo(UserPlayer, { foreignKey: 'player_id' });
+    StoreItem.hasMany(PurchaseHistory, { foreignKey: 'item_id' });
+    PurchaseHistory.belongsTo(StoreItem, { foreignKey: 'item_id', as: 'store_item' });
 
     console.log('--- Associations initialized (UserPlayer)');
 };

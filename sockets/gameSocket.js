@@ -8,7 +8,7 @@ const {
   advanceTurn,
   buildPublicGameState
 } = require('../game/engine');
-const { Player, isDatabaseAvailable } = require('../models');
+const { Player, MatchHistory, Match, isDatabaseAvailable } = require('../models');
 
 const COLORS = ['red', 'green', 'yellow', 'blue'];
 
@@ -61,9 +61,9 @@ const emitGameState = (io, room) => {
 // ── XP Calculation ──
 // XP is ONLY awarded in online multiplayer games (not offline / vs computer)
 // Victory: 50 XP | Capture a piece: 5 XP | Finish a piece (reach home): 10 XP
-const XP_VICTORY = 50;
-const XP_PER_CAPTURE = 5;
-const XP_PER_FINISH = 10;
+const XP_VICTORY = 500;
+const XP_PER_CAPTURE = 50;
+const XP_PER_FINISH = 100;
 
 // Calculate XP earned by a specific player from game stats
 const calculatePlayerXp = (playerId, room, isWinner) => {
@@ -87,13 +87,25 @@ const calculatePlayerXp = (playerId, room, isWinner) => {
   };
 };
 
-// Record victory and losses in database
+// Record victory and losses in database, create MatchHistory for each player
 const recordVictory = async (winner, room) => {
   if (!isDatabaseAvailable()) return {};
   const xpResults = {};
   try {
     const player = await Player.findByPk(winner.id);
     if (!player) return xpResults;
+
+    // Calculate match duration from room.gameStartedAt
+    let durationStr = '0:00';
+    if (room.gameStartedAt) {
+      const elapsed = Math.floor((Date.now() - room.gameStartedAt) / 1000);
+      const mins = Math.floor(elapsed / 60);
+      const secs = elapsed % 60;
+      durationStr = `${mins}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    // Determine the game mode
+    const gameMode = room.isOffline ? 'Offline' : 'Online';
 
     player.total_games += 1;
     if (room.isOffline) {
@@ -106,6 +118,30 @@ const recordVictory = async (winner, room) => {
       xpResults[winner.id] = { xpEarned: total, newXp: player.xp, newRank: player.rank, newLevel: player.level, breakdown };
     }
     await player.save();
+
+    // Create MatchHistory for the winner (only if not a guest)
+    if (!winner.id.startsWith('guest-')) {
+      const winnerXpGained = xpResults[winner.id]?.xpEarned || 0;
+      const opponentNames = room.players
+        .filter(p => p.id !== winner.id)
+        .map(p => p.username)
+        .join(', ');
+      try {
+        await MatchHistory.create({
+          player_id: winner.id,
+          opponent_name: opponentNames || 'Unknown',
+          result: 'win',
+          mode: gameMode,
+          duration: durationStr,
+          xp_gained: winnerXpGained,
+          captures: room.gameStats?.[winner.id]?.captures || 0,
+          finishes: room.gameStats?.[winner.id]?.finishes || 0,
+          players_count: room.players.length
+        });
+      } catch (e) {
+        console.error('Failed to create winner match history:', e.message);
+      }
+    }
 
     // Record losses for other players and total games
     for (const p of room.players) {
@@ -125,8 +161,48 @@ const recordVictory = async (winner, room) => {
             xpResults[p.id] = { xpEarned: total, newXp: otherPlayer.xp, newRank: otherPlayer.rank, newLevel: otherPlayer.level, breakdown };
           }
           await otherPlayer.save();
+
+          // Create MatchHistory for the loser
+          const loserXpGained = xpResults[p.id]?.xpEarned || 0;
+          const opponentNames = room.players
+            .filter(op => op.id !== p.id)
+            .map(op => op.username)
+            .join(', ');
+          try {
+            await MatchHistory.create({
+              player_id: p.id,
+              opponent_name: opponentNames || 'Unknown',
+              result: 'loss',
+              mode: gameMode,
+              duration: durationStr,
+              xp_gained: loserXpGained,
+              captures: room.gameStats?.[p.id]?.captures || 0,
+              finishes: room.gameStats?.[p.id]?.finishes || 0,
+              players_count: room.players.length
+            });
+          } catch (e) {
+            console.error('Failed to create loser match history:', e.message);
+          }
         }
       } catch (e) { /* skip */ }
+    }
+
+    // Create a Match record for the overall game
+    try {
+      await Match.create({
+        winner_id: winner.id.startsWith('guest-') ? null : winner.id,
+        room_code: room.code,
+        players_data: room.players.map(p => ({
+          id: p.id,
+          username: p.username,
+          color: p.color,
+          isAi: p.isAi || false,
+          stats: room.gameStats?.[p.id] || { captures: 0, finishes: 0 },
+          xpEarned: xpResults[p.id]?.xpEarned || 0
+        }))
+      });
+    } catch (e) {
+      console.error('Failed to create match record:', e.message);
     }
   } catch (error) {
     console.error('Error recording victory:', error.message);
@@ -141,6 +217,8 @@ const maybeHandleAiTurn = (io, room) => {
 
   // Step 1: Show "thinking" delay before rolling (1.2s)
   setTimeout(() => {
+    // Guard: game may have ended or been reset during the AI think delay
+    if (!room.gameState) return;
     const roll = rollCowrie();
     const validMoves = getValidMoves(room.gameState, current.id, roll.move);
 
@@ -155,6 +233,7 @@ const maybeHandleAiTurn = (io, room) => {
     if (validMoves.length === 0) {
       // Wait before passing turn (1s)
       setTimeout(() => {
+        if (!room.gameState) return;
         advanceTurn(room.gameState);
         io.to(room.code).emit('turnPassed', {
           reason: 'No valid moves',
@@ -168,6 +247,7 @@ const maybeHandleAiTurn = (io, room) => {
 
     // Step 2: Wait before making move (1.5s)
     setTimeout(async () => {
+      if (!room.gameState) return;
       const chosen = chooseAiMove(validMoves, room.gameState, current.id);
       const result = applyMove(room.gameState, current.id, chosen.tokenIndex, roll.move, chosen.action);
       if (!result) return;
@@ -283,7 +363,7 @@ const setupGameSocket = (io, rooms) => {
     });
 
     // Friend responds to room invite
-    socket.on('respondToInvite', ({ roomCode, accepted, playerId, username }) => {
+    socket.on('respondToInvite', async ({ roomCode, accepted, playerId, username }) => {
       const room = getRoom(rooms, roomCode);
       if (!room) return;
 
@@ -358,13 +438,35 @@ const setupGameSocket = (io, rooms) => {
 
       if (room.players.length >= room.maxPlayers) return;
 
+      // Fetch equipped items from DB for the invited player
+      let equippedItems = { board: 'b01', cowrie: 'c01', piece: 'p01' };
+      if (isDatabaseAvailable() && playerId && !playerId.startsWith('guest-')) {
+        try {
+          const { PlayerItem, StoreItem } = require('../models');
+          const items = await PlayerItem.findAll({
+            where: { player_id: playerId, equipped: true },
+            include: [{ model: StoreItem, as: 'store_item' }]
+          });
+          items.forEach(pi => {
+            if (pi.store_item && pi.store_item.category) {
+              if (pi.store_item.category === 'board') equippedItems.board = pi.item_id;
+              if (pi.store_item.category === 'cowrie') equippedItems.cowrie = pi.item_id;
+              if (pi.store_item.category === 'piece') equippedItems.piece = pi.item_id;
+            }
+          });
+        } catch (e) {
+          console.error('Failed to fetch equipped items for invited player:', e);
+        }
+      }
+
       const playerColor = getNextAvailableColor(room.players);
       room.players.push({
         id: playerId,
         username,
         color: playerColor,
         ready: false,
-        connected: true
+        connected: true,
+        equippedItems
       });
 
       socket.emit('inviteAccepted', {
@@ -484,6 +586,7 @@ const setupGameSocket = (io, rooms) => {
 
       room.gameStarted = true;
       room.gameState = createGameState(room.players);
+      room.gameStartedAt = Date.now(); // Track game start time for duration calculation
       // Initialize per-player game stats for XP tracking
       room.gameStats = {};
       room.players.forEach(p => {
@@ -634,6 +737,9 @@ const setupGameSocket = (io, rooms) => {
           player._rejoinTimer = setTimeout(() => {
             // Check if still disconnected after 60s
             if (!player.connected) {
+              // Guard: game may have ended or reset while timer was running
+              if (!room.gameState) return;
+
               player.forfeited = true;
 
               // Remove forfeited player's tokens from the board (send all to base/finished)

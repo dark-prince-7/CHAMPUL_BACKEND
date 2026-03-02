@@ -1,4 +1,4 @@
-const { StoreItem, PlayerItem, Player, sequelize } = require('../models');
+const { StoreItem, PlayerItem, Player, PurchaseHistory, sequelize } = require('../models');
 
 exports.getStoreItems = async (req, res) => {
     try {
@@ -15,21 +15,36 @@ exports.getStoreItems = async (req, res) => {
 exports.getCollection = async (req, res) => {
     try {
         const { playerId } = req.params;
-        let inventory = await PlayerItem.findAll({
-            where: { player_id: playerId },
-            include: [{ model: StoreItem, as: 'store_item' }]
-        });
 
-        if (inventory.length === 0) {
-            const defaults = await StoreItem.findAll({
-                where: { id: ['b01', 'c01', 'p01'] }
+        // Auto-grant default items if they don't exist for this player
+        const DEFAULT_ITEMS = [
+            { id: 'b01', cat: 'board' },
+            { id: 'c01', cat: 'cowrie' },
+            { id: 'p01', cat: 'piece' }
+        ];
+        for (const d of DEFAULT_ITEMS) {
+            const exists = await PlayerItem.findOne({
+                where: { player_id: playerId, item_id: d.id }
             });
-            inventory = defaults.map(item => ({
-                store_item: item,
-                equipped: true,
-                is_default: true
-            }));
+            if (!exists) {
+                // Check if player owns ANY item in this category
+                const hasCategory = await PlayerItem.findOne({
+                    where: { player_id: playerId, category: d.cat }
+                });
+                await PlayerItem.create({
+                    player_id: playerId,
+                    item_id: d.id,
+                    category: d.cat,
+                    equipped: !hasCategory  // equip default only if no other item in category is owned
+                }).catch(() => {});
+            }
         }
+
+        const inventory = await PlayerItem.findAll({
+            where: { player_id: playerId },
+            include: [{ model: StoreItem, as: 'store_item' }],
+            order: [['acquired_at', 'DESC']]
+        });
 
         const grouped = { boards: [], cowries: [], pieces: [], themes: [], avatars: [], emotes: [] };
         inventory.forEach(inv => {
@@ -58,7 +73,7 @@ exports.buyItem = async (req, res) => {
 
         if (req.user.id !== playerId) {
             await transaction.rollback();
-            return res.status(403).json({ success: false, error: 'Unauthorized' });
+            return res.status(403).json({ success: false, message: 'Unauthorized' });
         }
 
         const player = await Player.findByPk(playerId, { transaction });
@@ -98,6 +113,26 @@ exports.buyItem = async (req, res) => {
             category: item.category,
             equipped: false
         }, { transaction });
+
+        // Record purchase history (non-blocking — don't fail the purchase if history logging fails)
+        try {
+            await PurchaseHistory.create({
+                player_id: playerId,
+                item_id: itemId,
+                item_name: item.name,
+                category: item.category,
+                rarity: item.rarity,
+                currency: item.currency,
+                amount_spent: item.price,
+                coins_before: item.currency === 'coins' ? player.coins + item.price : player.coins,
+                coins_after: player.coins,
+                gems_before: item.currency === 'gems' ? player.gems + item.price : player.gems,
+                gems_after: player.gems
+            }, { transaction });
+        } catch (historyErr) {
+            console.error('Warning: Failed to record purchase history:', historyErr.message);
+            // Continue with the purchase — history is nice-to-have, not critical
+        }
 
         await transaction.commit();
 
@@ -146,5 +181,39 @@ exports.equipItem = async (req, res) => {
         await transaction.rollback();
         console.error('Equip item error:', error);
         res.status(500).json({ success: false, message: 'Failed to equip item', data: null });
+    }
+};
+
+exports.getPurchaseHistory = async (req, res) => {
+    try {
+        const { playerId } = req.params;
+        const history = await PurchaseHistory.findAll({
+            where: { player_id: playerId },
+            order: [['purchased_at', 'DESC']],
+            limit: 100
+        });
+
+        // Compute totals
+        let totalCoinsSpent = 0;
+        let totalGemsSpent = 0;
+        history.forEach(h => {
+            if (h.currency === 'coins') totalCoinsSpent += h.amount_spent;
+            if (h.currency === 'gems') totalGemsSpent += h.amount_spent;
+        });
+
+        res.json({
+            success: true,
+            data: {
+                purchases: history,
+                summary: {
+                    totalCoinsSpent,
+                    totalGemsSpent,
+                    totalPurchases: history.length
+                }
+            }
+        });
+    } catch (error) {
+        console.error('Fetch purchase history error:', error);
+        res.status(500).json({ success: false, message: 'Failed to fetch purchase history' });
     }
 };
