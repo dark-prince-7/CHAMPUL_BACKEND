@@ -1,6 +1,7 @@
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
 const { PlayerItem, StoreItem, isDatabaseAvailable } = require('../models');
+const { buildEquippedItems } = require('../utils/equippedItems');
 
 const router = express.Router();
 
@@ -62,25 +63,8 @@ router.post('/create-room', async (req, res) => {
       roomCode = generateRoomCode();
     }
 
-    // Fetch equipped items from DB
-    let equippedItems = { board: 'b01', cowrie: 'c01', piece: 'p01' };
-    if (isDatabaseAvailable() && !playerId.startsWith('guest-')) {
-      try {
-        const items = await PlayerItem.findAll({
-          where: { player_id: playerId, equipped: true },
-          include: [{ model: StoreItem, as: 'store_item' }]
-        });
-        items.forEach(pi => {
-          if (pi.store_item && pi.store_item.category) {
-            if (pi.store_item.category === 'board') equippedItems.board = pi.item_id;
-            if (pi.store_item.category === 'cowrie') equippedItems.cowrie = pi.item_id;
-            if (pi.store_item.category === 'piece') equippedItems.piece = pi.item_id;
-          }
-        });
-      } catch (e) {
-        console.error('Failed to fetch equipped items for host:', e);
-      }
-    }
+    // Fetch equipped items from DB with full metadata
+    const equippedItems = await buildEquippedItems(playerId);
 
     rooms[roomCode] = {
       id: uuidv4(),
@@ -183,25 +167,8 @@ router.post('/join-room', async (req, res) => {
 
     const playerColor = getNextPlayerColor(room.players);
 
-    // Fetch equipped items from DB
-    let equippedItems = { board: 'b01', cowrie: 'c01', piece: 'p01' };
-    if (isDatabaseAvailable() && !playerId.startsWith('guest-')) {
-      try {
-        const items = await PlayerItem.findAll({
-          where: { player_id: playerId, equipped: true },
-          include: [{ model: StoreItem, as: 'store_item' }]
-        });
-        items.forEach(pi => {
-          if (pi.store_item && pi.store_item.category) {
-            if (pi.store_item.category === 'board') equippedItems.board = pi.item_id;
-            if (pi.store_item.category === 'cowrie') equippedItems.cowrie = pi.item_id;
-            if (pi.store_item.category === 'piece') equippedItems.piece = pi.item_id;
-          }
-        });
-      } catch (e) {
-        console.error('Failed to fetch equipped items for joining player:', e);
-      }
-    }
+    // Fetch equipped items from DB with full metadata
+    const equippedItems = await buildEquippedItems(playerId);
 
     room.players.push({
       id: playerId,

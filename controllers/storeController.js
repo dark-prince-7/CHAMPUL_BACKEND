@@ -1,4 +1,5 @@
 const { StoreItem, PlayerItem, Player, PurchaseHistory, sequelize } = require('../models');
+const { buildEquippedItems } = require('../utils/equippedItems');
 
 exports.getStoreItems = async (req, res) => {
     try {
@@ -215,5 +216,24 @@ exports.getPurchaseHistory = async (req, res) => {
     } catch (error) {
         console.error('Fetch purchase history error:', error);
         res.status(500).json({ success: false, message: 'Failed to fetch purchase history' });
+    }
+};
+
+// GET equipped items with full metadata for a player
+exports.getEquippedItems = async (req, res) => {
+    try {
+        const { playerId } = req.params;
+        const equipped = await buildEquippedItems(playerId);
+        res.json({
+            success: true,
+            data: {
+                board: { id: equipped.board, themeId: equipped.boardMeta.themeId ?? 0, metadata: equipped.boardMeta },
+                cowrie: { id: equipped.cowrie, setId: equipped.cowrieMeta.setId ?? 0, metadata: equipped.cowrieMeta },
+                piece: { id: equipped.piece, pieceSetId: equipped.pieceMeta.pieceSetId ?? 0, metadata: equipped.pieceMeta },
+            }
+        });
+    } catch (error) {
+        console.error('Fetch equipped items error:', error);
+        res.status(500).json({ success: false, message: 'Failed to fetch equipped items' });
     }
 };

@@ -6,9 +6,12 @@ const {
   getValidMoves,
   applyMove,
   advanceTurn,
-  buildPublicGameState
+  buildPublicGameState,
+  createDiceStack,
+  getStackMoveSummary
 } = require('../game/engine');
 const { Player, MatchHistory, Match, isDatabaseAvailable } = require('../models');
+const { buildEquippedItems } = require('../utils/equippedItems');
 
 const COLORS = ['red', 'green', 'yellow', 'blue'];
 
@@ -215,41 +218,124 @@ const maybeHandleAiTurn = (io, room) => {
   const current = getCurrentPlayer(room.gameState);
   if (!current?.isAi) return;
 
-  // Step 1: Show "thinking" delay before rolling (1.2s)
-  setTimeout(() => {
-    // Guard: game may have ended or been reset during the AI think delay
+  // ── AI Dice Stack Turn ──
+
+  // Phase 1: Rolling phase — AI accumulates stack
+  const doAiRoll = () => {
     if (!room.gameState) return;
-    const roll = rollCowrie();
-    const validMoves = getValidMoves(room.gameState, current.id, roll.move);
+    if (!room.diceStack) room.diceStack = createDiceStack();
 
-    io.to(room.code).emit('diceRolled', {
-      diceValue: roll.move,
-      playerId: current.id,
-      playerColor: current.color,
-      validMoves,
-      gameState: buildPublicGameState(room.gameState)
-    });
+    setTimeout(() => {
+      if (!room.gameState) return;
+      const roll = rollCowrie();
+      const isStackingRoll = roll.move === 4 || roll.move === 8;
+      const hasExistingStack = room.diceStack.values.length > 0;
 
-    if (validMoves.length === 0) {
-      // Wait before passing turn (1s)
-      setTimeout(() => {
-        if (!room.gameState) return;
-        advanceTurn(room.gameState);
-        io.to(room.code).emit('turnPassed', {
-          reason: 'No valid moves',
-          gameState: buildPublicGameState(room.gameState),
-          currentPlayer: getCurrentPlayer(room.gameState)
+      if (isStackingRoll || hasExistingStack) {
+        // Push to stack only when 4/8 rolled, or there are prior stacked values
+        room.diceStack.values.push(roll.move);
+      }
+
+      io.to(room.code).emit('diceRolled', {
+        diceValue: roll.move,
+        playerId: current.id,
+        playerColor: current.color,
+        validMoves: [],
+        gameState: buildPublicGameState(room.gameState),
+        diceStack: isStackingRoll || hasExistingStack ? { ...room.diceStack } : createDiceStack()
+      });
+
+      if (isStackingRoll) {
+        // Stack continues — AI rolls again
+        io.to(room.code).emit('stackUpdated', {
+          diceStack: { ...room.diceStack },
+          phase: 'rolling',
+          gameState: buildPublicGameState(room.gameState)
         });
-        maybeHandleAiTurn(io, room);
-      }, 1000);
+        doAiRoll();
+      } else if (hasExistingStack) {
+        // Non-4/8 finalises a prior stack — go to selection phase
+        doAiSelectAndMove();
+      } else {
+        // Plain roll (1,2,3) with no prior stack — treat as single-value stack internally
+        room.gameState.lastRoll = roll;
+        room.diceStack.values.push(roll.move); // single value so doAiSelectAndMove works
+        doAiSelectAndMove();
+      }
+    }, 1200);
+  };
+
+  // Phase 2: AI selects a value and moves, repeating until stack is empty
+  const doAiSelectAndMove = () => {
+    if (!room.gameState) return;
+    if (!room.diceStack) return;
+
+    const { hasAnyMoves, movesPerValue } = getStackMoveSummary(
+      room.gameState, current.id, room.diceStack.values
+    );
+
+    if (!hasAnyMoves) {
+      // No valid moves for any stack value — pass
+      room.diceStack = createDiceStack();
+      io.to(room.code).emit('stackUpdated', {
+        diceStack: { ...room.diceStack },
+        phase: 'idle',
+        gameState: buildPublicGameState(room.gameState)
+      });
+      advanceTurn(room.gameState);
+      io.to(room.code).emit('turnPassed', {
+        reason: 'No valid moves',
+        gameState: buildPublicGameState(room.gameState),
+        currentPlayer: getCurrentPlayer(room.gameState),
+        diceStack: createDiceStack()
+      });
+      maybeHandleAiTurn(io, room);
       return;
     }
 
-    // Step 2: Wait before making move (1.5s)
+    // AI picks the best value (prefer one with capture/finish moves)
+    let bestIdx = -1;
+    let bestScore = -1;
+    room.diceStack.values.forEach((val, idx) => {
+      const moves = movesPerValue[idx] || [];
+      if (moves.length === 0) return;
+      let score = moves.length;
+      moves.forEach(m => {
+        if (m.action === 'finish') score += 50;
+        if (m.action === 'captureInPlace') score += 60;
+        // Check if landing causes capture
+        const hasOpp = room.gameState.players.some(p =>
+          p.id !== current.id && p.tokens.some(t => t.row === m.to.row && t.col === m.to.col && !t.isFinished)
+        );
+        if (hasOpp) score += 70;
+      });
+      if (score > bestScore) { bestScore = score; bestIdx = idx; }
+    });
+
+    if (bestIdx === -1) {
+      // Fallback: pick first with moves
+      bestIdx = room.diceStack.values.findIndex((_, idx) => (movesPerValue[idx] || []).length > 0);
+    }
+
+    const selectedValue = room.diceStack.values[bestIdx];
+    room.diceStack.selectedValue = selectedValue;
+    room.diceStack.selectedIndex = bestIdx;
+
+    const validMoves = movesPerValue[bestIdx] || getValidMoves(room.gameState, current.id, selectedValue);
+
+    io.to(room.code).emit('stackValueSelected', {
+      selectedIndex: bestIdx,
+      selectedValue,
+      validMoves,
+      diceStack: { ...room.diceStack },
+      gameState: buildPublicGameState(room.gameState)
+    });
+
+    // Now AI picks the best move for this value
     setTimeout(async () => {
       if (!room.gameState) return;
       const chosen = chooseAiMove(validMoves, room.gameState, current.id);
-      const result = applyMove(room.gameState, current.id, chosen.tokenIndex, roll.move, chosen.action);
+      const result = applyMove(room.gameState, current.id, chosen.tokenIndex, selectedValue, chosen.action);
       if (!result) return;
 
       // Track stats for XP calculation (AI turn)
@@ -258,7 +344,16 @@ const maybeHandleAiTurn = (io, room) => {
         if (result.finishedNow) room.gameStats[current.id].finishes += 1;
       }
 
-      const earnedExtraTurn = roll.extraTurn || result.capturedTokens.length > 0 || result.finishedNow;
+      // Remove used value from stack
+      room.diceStack.values.splice(bestIdx, 1);
+      room.diceStack.selectedValue = null;
+      room.diceStack.selectedIndex = null;
+
+      // Check for bonus turns (capture or finish)
+      const earnedBonus = result.capturedTokens.length > 0 || result.finishedNow;
+      if (earnedBonus) {
+        room.diceStack.bonusTurns += 1;
+      }
 
       io.to(room.code).emit('tokenMoved', {
         tokenIndex: chosen.tokenIndex,
@@ -268,8 +363,10 @@ const maybeHandleAiTurn = (io, room) => {
         to: result.to,
         capturedTokens: result.capturedTokens,
         gameState: buildPublicGameState(room.gameState),
-        extraTurn: earnedExtraTurn,
-        currentPlayer: current
+        extraTurn: true, // Always true during stack resolution
+        currentPlayer: current,
+        diceStack: { ...room.diceStack },
+        finishedNow: result.finishedNow
       });
 
       if (result.winner) {
@@ -282,18 +379,36 @@ const maybeHandleAiTurn = (io, room) => {
         return;
       }
 
-      if (!earnedExtraTurn) {
+      // Decide next action
+      if (room.diceStack.values.length > 0) {
+        // More values in stack — continue selecting
+        setTimeout(() => doAiSelectAndMove(), 1000);
+      } else if (room.diceStack.bonusTurns > 0) {
+        // Bonus turns remaining — roll again
+        room.diceStack.bonusTurns -= 1;
+        io.to(room.code).emit('stackUpdated', {
+          diceStack: { ...room.diceStack },
+          phase: 'rolling',
+          gameState: buildPublicGameState(room.gameState)
+        });
+        doAiRoll();
+      } else {
+        // Stack empty, no bonus — advance turn
+        room.diceStack = createDiceStack();
         advanceTurn(room.gameState);
         io.to(room.code).emit('turnPassed', {
           reason: 'Turn ended',
           gameState: buildPublicGameState(room.gameState),
-          currentPlayer: getCurrentPlayer(room.gameState)
+          currentPlayer: getCurrentPlayer(room.gameState),
+          diceStack: createDiceStack()
         });
+        maybeHandleAiTurn(io, room);
       }
-
-      maybeHandleAiTurn(io, room);
     }, 1500);
-  }, 1200);
+  };
+
+  // Start AI turn
+  doAiRoll();
 };
 
 const chooseAiMove = (validMoves, gameState, playerId) => {
@@ -405,7 +520,8 @@ const setupGameSocket = (io, rooms) => {
           gameState: buildPublicGameState(room.gameState),
           players: sanitizePlayers(room.players),
           currentPlayer: getCurrentPlayer(room.gameState),
-          room: { code: room.code, hostId: room.hostId, isOffline: room.isOffline, passcode: room.passcode }
+          room: { code: room.code, hostId: room.hostId, isOffline: room.isOffline, passcode: room.passcode },
+          diceStack: room.diceStack || createDiceStack()
         });
 
         io.to(room.code).emit('playerRejoined', {
@@ -438,26 +554,8 @@ const setupGameSocket = (io, rooms) => {
 
       if (room.players.length >= room.maxPlayers) return;
 
-      // Fetch equipped items from DB for the invited player
-      let equippedItems = { board: 'b01', cowrie: 'c01', piece: 'p01' };
-      if (isDatabaseAvailable() && playerId && !playerId.startsWith('guest-')) {
-        try {
-          const { PlayerItem, StoreItem } = require('../models');
-          const items = await PlayerItem.findAll({
-            where: { player_id: playerId, equipped: true },
-            include: [{ model: StoreItem, as: 'store_item' }]
-          });
-          items.forEach(pi => {
-            if (pi.store_item && pi.store_item.category) {
-              if (pi.store_item.category === 'board') equippedItems.board = pi.item_id;
-              if (pi.store_item.category === 'cowrie') equippedItems.cowrie = pi.item_id;
-              if (pi.store_item.category === 'piece') equippedItems.piece = pi.item_id;
-            }
-          });
-        } catch (e) {
-          console.error('Failed to fetch equipped items for invited player:', e);
-        }
-      }
+      // Fetch equipped items from DB with full metadata
+      const equippedItems = await buildEquippedItems(playerId);
 
       const playerColor = getNextAvailableColor(room.players);
       room.players.push({
@@ -505,7 +603,8 @@ const setupGameSocket = (io, rooms) => {
           gameState: buildPublicGameState(room.gameState),
           players: sanitizePlayers(room.players),
           currentPlayer: getCurrentPlayer(room.gameState),
-          room: { code: room.code, hostId: room.hostId, isOffline: room.isOffline, passcode: room.passcode }
+          room: { code: room.code, hostId: room.hostId, isOffline: room.isOffline, passcode: room.passcode },
+          diceStack: room.diceStack || createDiceStack()
         });
       }
     });
@@ -535,7 +634,7 @@ const setupGameSocket = (io, rooms) => {
         ready: true,
         connected: true,
         isAi: !!isAi,
-        equippedItems: { board: 'b01', cowrie: 'c01', piece: 'p01' }
+        equippedItems: { board: 'b01', cowrie: 'c01', piece: 'p01', boardMeta: { themeId: 0 }, cowrieMeta: { setId: 0 }, pieceMeta: { pieceSetId: 0 } }
       });
 
       emitRoomPlayers(io, room);
@@ -558,7 +657,7 @@ const setupGameSocket = (io, rooms) => {
         ready: true,
         connected: true,
         isAi: true,
-        equippedItems: { board: 'b01', cowrie: 'c01', piece: 'p01' }
+        equippedItems: { board: 'b01', cowrie: 'c01', piece: 'p01', boardMeta: { themeId: 0 }, cowrieMeta: { setId: 0 }, pieceMeta: { pieceSetId: 0 } }
       });
 
       emitRoomPlayers(io, room);
@@ -587,6 +686,7 @@ const setupGameSocket = (io, rooms) => {
       room.gameStarted = true;
       room.gameState = createGameState(room.players);
       room.gameStartedAt = Date.now(); // Track game start time for duration calculation
+      room.diceStack = createDiceStack(); // Initialize dice stack
       // Initialize per-player game stats for XP tracking
       room.gameStats = {};
       room.players.forEach(p => {
@@ -600,60 +700,209 @@ const setupGameSocket = (io, rooms) => {
     socket.on('rollDice', ({ roomCode, playerId }) => {
       const room = getRoom(rooms, roomCode);
       if (!room || !room.gameState) return;
-      if (room.gamePaused) return; // Game is paused waiting for rejoin
+      if (room.gamePaused) return;
 
       const current = getCurrentPlayer(room.gameState);
       const hostOverride = room.isOffline && room.hostId === playerId;
       if (!current || (!hostOverride && current.id !== playerId)) return;
 
+      // Initialize stack if needed
+      if (!room.diceStack) room.diceStack = createDiceStack();
+
       const roll = rollCowrie();
       const actingPlayerId = hostOverride ? current.id : playerId;
-      const validMoves = getValidMoves(room.gameState, actingPlayerId, roll.move);
 
-      io.to(room.code).emit('diceRolled', {
-        diceValue: roll.move,
-        playerId: actingPlayerId,
-        playerColor: current.color,
-        validMoves,
-        gameState: buildPublicGameState(room.gameState)
-      });
+      const isStackingRoll = roll.move === 4 || roll.move === 8;
+      const hasExistingStack = room.diceStack.values.length > 0;
+
+      if (isStackingRoll) {
+        // 4 or 8 — push to stack and force re-roll
+        room.diceStack.values.push(roll.move);
+        io.to(room.code).emit('diceRolled', {
+          diceValue: roll.move,
+          playerId: actingPlayerId,
+          playerColor: current.color,
+          validMoves: [],
+          gameState: buildPublicGameState(room.gameState),
+          diceStack: { ...room.diceStack },
+          stackPhase: 'rolling'
+        });
+        room.gameState.lastRoll = roll;
+      } else if (hasExistingStack) {
+        // Non-4/8 but there are prior stacked values — finalise the stack
+        room.diceStack.values.push(roll.move);
+        const { hasAnyMoves, movesPerValue } = getStackMoveSummary(
+          room.gameState, actingPlayerId, room.diceStack.values
+        );
+
+        io.to(room.code).emit('diceRolled', {
+          diceValue: roll.move,
+          playerId: actingPlayerId,
+          playerColor: current.color,
+          validMoves: [],
+          gameState: buildPublicGameState(room.gameState),
+          diceStack: { ...room.diceStack },
+          stackPhase: 'selecting',
+          movesPerValue
+        });
+
+        if (!hasAnyMoves) {
+          // No valid moves for any stack value — auto-pass
+          room.diceStack = createDiceStack();
+          setTimeout(() => {
+            advanceTurn(room.gameState);
+            io.to(room.code).emit('turnPassed', {
+              reason: 'No valid moves',
+              gameState: buildPublicGameState(room.gameState),
+              currentPlayer: getCurrentPlayer(room.gameState),
+              diceStack: createDiceStack()
+            });
+            maybeHandleAiTurn(io, room);
+          }, 1500);
+        }
+
+        room.gameState.lastRoll = roll;
+      } else {
+        // Plain roll (1, 2, 3) with no prior stack — bypass stack entirely
+        room.gameState.lastRoll = roll;
+        const validMoves = getValidMoves(room.gameState, actingPlayerId, roll.move);
+
+        // Store on diceStack.selectedValue so moveToken can use it
+        room.diceStack.selectedValue = roll.move;
+        room.diceStack.selectedIndex = 0;
+
+        io.to(room.code).emit('diceRolled', {
+          diceValue: roll.move,
+          playerId: actingPlayerId,
+          playerColor: current.color,
+          validMoves,
+          gameState: buildPublicGameState(room.gameState),
+          diceStack: createDiceStack(), // empty stack — no panel shown
+          stackPhase: 'moving'
+        });
+
+        if (!validMoves.length) {
+          room.diceStack = createDiceStack();
+          setTimeout(() => {
+            advanceTurn(room.gameState);
+            io.to(room.code).emit('turnPassed', {
+              reason: 'No valid moves',
+              gameState: buildPublicGameState(room.gameState),
+              currentPlayer: getCurrentPlayer(room.gameState),
+              diceStack: createDiceStack()
+            });
+            maybeHandleAiTurn(io, room);
+          }, 1500);
+        }
+      }
+    });
+
+    // Player selects a value from the dice stack to use
+    socket.on('selectStackValue', ({ roomCode, playerId, stackIndex }) => {
+      const room = getRoom(rooms, roomCode);
+      if (!room || !room.gameState || !room.diceStack) return;
+      if (room.gamePaused) return;
+
+      const current = getCurrentPlayer(room.gameState);
+      const hostOverride = room.isOffline && room.hostId === playerId;
+      if (!current || (!hostOverride && current.id !== playerId)) return;
+
+      const actingPlayerId = hostOverride ? current.id : playerId;
+      const idx = Number(stackIndex);
+      if (idx < 0 || idx >= room.diceStack.values.length) return;
+
+      const selectedValue = room.diceStack.values[idx];
+      room.diceStack.selectedValue = selectedValue;
+      room.diceStack.selectedIndex = idx;
+
+      const validMoves = getValidMoves(room.gameState, actingPlayerId, selectedValue);
 
       if (validMoves.length === 0) {
-        advanceTurn(room.gameState);
-        io.to(room.code).emit('turnPassed', {
-          reason: 'No valid moves',
-          gameState: buildPublicGameState(room.gameState),
-          currentPlayer: getCurrentPlayer(room.gameState)
-        });
-        maybeHandleAiTurn(io, room);
-      } else {
-        room.gameState.lastRoll = roll;
+        // No valid moves for this value — consume it
+        room.diceStack.values.splice(idx, 1);
+        room.diceStack.selectedValue = null;
+        room.diceStack.selectedIndex = null;
+
+        // Check if any remaining values have moves
+        if (room.diceStack.values.length > 0) {
+          const { hasAnyMoves, movesPerValue } = getStackMoveSummary(
+            room.gameState, actingPlayerId, room.diceStack.values
+          );
+
+          io.to(room.code).emit('stackValueSkipped', {
+            skippedValue: selectedValue,
+            diceStack: { ...room.diceStack },
+            movesPerValue,
+            gameState: buildPublicGameState(room.gameState)
+          });
+
+          if (!hasAnyMoves) {
+            // All remaining values also have no moves — pass
+            room.diceStack = createDiceStack();
+            advanceTurn(room.gameState);
+            io.to(room.code).emit('turnPassed', {
+              reason: 'No valid moves',
+              gameState: buildPublicGameState(room.gameState),
+              currentPlayer: getCurrentPlayer(room.gameState),
+              diceStack: createDiceStack()
+            });
+            maybeHandleAiTurn(io, room);
+          }
+        } else if (room.diceStack.bonusTurns > 0) {
+          // Stack empty but bonus turns available
+          room.diceStack.bonusTurns -= 1;
+          io.to(room.code).emit('stackUpdated', {
+            diceStack: { ...room.diceStack },
+            phase: 'rolling',
+            gameState: buildPublicGameState(room.gameState)
+          });
+        } else {
+          // Stack empty, no bonus — advance
+          room.diceStack = createDiceStack();
+          advanceTurn(room.gameState);
+          io.to(room.code).emit('turnPassed', {
+            reason: 'No valid moves remaining',
+            gameState: buildPublicGameState(room.gameState),
+            currentPlayer: getCurrentPlayer(room.gameState),
+            diceStack: createDiceStack()
+          });
+          maybeHandleAiTurn(io, room);
+        }
+        return;
       }
+
+      // Has valid moves — send them
+      io.to(room.code).emit('stackValueSelected', {
+        selectedIndex: idx,
+        selectedValue,
+        validMoves,
+        diceStack: { ...room.diceStack },
+        gameState: buildPublicGameState(room.gameState)
+      });
     });
 
     socket.on('moveToken', async ({ roomCode, playerId, tokenIndex, action }) => {
       const room = getRoom(rooms, roomCode);
       if (!room || !room.gameState) return;
-      if (room.gamePaused) return; // Game is paused waiting for rejoin
+      if (room.gamePaused) return;
 
       const current = getCurrentPlayer(room.gameState);
       const hostOverride = room.isOffline && room.hostId === playerId;
       if (!current || (!hostOverride && current.id !== playerId)) return;
 
-      const roll = room.gameState.lastRoll;
-      if (!roll) return;
+      if (!room.diceStack || room.diceStack.selectedValue === null) return;
 
       const actingPlayerId = hostOverride ? current.id : playerId;
-      const validMoves = getValidMoves(room.gameState, actingPlayerId, roll.move);
+      const moveSteps = room.diceStack.selectedValue;
+      const stackIdx = room.diceStack.selectedIndex;
 
+      const validMoves = getValidMoves(room.gameState, actingPlayerId, moveSteps);
       const targetIndex = Number(tokenIndex);
       const chosen = validMoves.find(move => move.tokenIndex === targetIndex && (!action || move.action === action));
 
-      if (!chosen) {
-        return;
-      }
+      if (!chosen) return;
 
-      const result = applyMove(room.gameState, actingPlayerId, targetIndex, roll.move, chosen.action);
+      const result = applyMove(room.gameState, actingPlayerId, targetIndex, moveSteps, chosen.action);
       if (!result) return;
 
       // Track stats for XP calculation (human move)
@@ -662,8 +911,22 @@ const setupGameSocket = (io, rooms) => {
         if (result.finishedNow) room.gameStats[actingPlayerId].finishes += 1;
       }
 
-      const earnedExtraTurn = roll.extraTurn || result.capturedTokens.length > 0 || result.finishedNow;
-      room.gameState.lastRoll = null;
+      // Remove used value from stack
+      room.diceStack.values.splice(stackIdx, 1);
+      room.diceStack.selectedValue = null;
+      room.diceStack.selectedIndex = null;
+
+      // ── PRIORITY RULE: Bonus turn (kill / finish) triggers IMMEDIATELY ──
+      // Bonus turn takes priority over any remaining stack values.
+      // The stack values are preserved and usable AFTER the bonus turn resolves.
+      const earnedBonus = result.capturedTokens.length > 0 || result.finishedNow;
+      if (earnedBonus) {
+        room.diceStack.bonusTurns += 1;
+      }
+
+      const stackHasValues = room.diceStack.values.length > 0;
+      const hasBonusTurns = room.diceStack.bonusTurns > 0;
+      const turnContinues = stackHasValues || hasBonusTurns;
 
       io.to(room.code).emit('tokenMoved', {
         tokenIndex,
@@ -673,8 +936,11 @@ const setupGameSocket = (io, rooms) => {
         to: result.to,
         capturedTokens: result.capturedTokens,
         gameState: buildPublicGameState(room.gameState),
-        extraTurn: earnedExtraTurn,
-        currentPlayer: current
+        extraTurn: turnContinues,
+        currentPlayer: current,
+        diceStack: { ...room.diceStack },
+        finishedNow: result.finishedNow,
+        bonusTriggered: earnedBonus       // flag for client animation
       });
 
       if (result.winner) {
@@ -687,16 +953,77 @@ const setupGameSocket = (io, rooms) => {
         return;
       }
 
-      if (!earnedExtraTurn) {
+      // ── PRIORITY: bonus turn fires before stack values ──
+      if (hasBonusTurns) {
+        // Consume one bonus turn — player rolls again immediately.
+        // Any remaining stack values are preserved and will be offered AFTER the bonus turn.
+        room.diceStack.bonusTurns -= 1;
+        io.to(room.code).emit('stackUpdated', {
+          diceStack: { ...room.diceStack },
+          phase: 'rolling',          // player rolls for the bonus turn
+          preservedStack: true,      // client hint: stack chips persist but are greyed until roll done
+          gameState: buildPublicGameState(room.gameState)
+        });
+      } else if (stackHasValues) {
+        // No bonus pending — offer remaining stack values
+        const { hasAnyMoves, movesPerValue } = getStackMoveSummary(
+          room.gameState, actingPlayerId, room.diceStack.values
+        );
+        io.to(room.code).emit('stackUpdated', {
+          diceStack: { ...room.diceStack },
+          phase: hasAnyMoves ? 'selecting' : 'idle',
+          movesPerValue,
+          gameState: buildPublicGameState(room.gameState)
+        });
+        if (!hasAnyMoves) {
+          // Remaining values have no moves — discard them, advance turn
+          room.diceStack = createDiceStack();
+          advanceTurn(room.gameState);
+          io.to(room.code).emit('turnPassed', {
+            reason: 'Turn ended',
+            gameState: buildPublicGameState(room.gameState),
+            currentPlayer: getCurrentPlayer(room.gameState),
+            diceStack: createDiceStack()
+          });
+          maybeHandleAiTurn(io, room);
+        }
+      } else {
+        // Nothing left — advance turn
+        room.diceStack = createDiceStack();
         advanceTurn(room.gameState);
         io.to(room.code).emit('turnPassed', {
           reason: 'Turn ended',
           gameState: buildPublicGameState(room.gameState),
-          currentPlayer: getCurrentPlayer(room.gameState)
+          currentPlayer: getCurrentPlayer(room.gameState),
+          diceStack: createDiceStack()
         });
+        maybeHandleAiTurn(io, room);
       }
+    });
 
-      maybeHandleAiTurn(io, room);
+    // ── Emoji Taunt System ──
+    socket.on('sendEmoji', ({ roomCode, playerId, emoji }) => {
+      const room = getRoom(rooms, roomCode);
+      if (!room) return;
+
+      const player = room.players.find(p => p.id === playerId);
+      if (!player) return;
+
+      // Cooldown: 2.5 seconds between emojis per player
+      const now = Date.now();
+      if (player._lastEmojiAt && now - player._lastEmojiAt < 2500) return;
+      player._lastEmojiAt = now;
+
+      // Validate emoji is a single printable character (emoji)
+      if (!emoji || typeof emoji !== 'string' || emoji.length > 8) return;
+
+      io.to(room.code).emit('emojiReceived', {
+        playerId,
+        username: player.username,
+        color: player.color || 'neutral',
+        emoji,
+        timestamp: now
+      });
     });
 
     socket.on('playAgain', ({ roomCode, playerId }) => {
@@ -899,7 +1226,8 @@ const setupGameSocket = (io, rooms) => {
         gameState: buildPublicGameState(room.gameState),
         players: sanitizePlayers(room.players),
         currentPlayer: getCurrentPlayer(room.gameState),
-        room: { code: room.code, hostId: room.hostId, isOffline: room.isOffline, passcode: room.passcode }
+        room: { code: room.code, hostId: room.hostId, isOffline: room.isOffline, passcode: room.passcode },
+        diceStack: room.diceStack || createDiceStack()
       });
 
       io.to(room.code).emit('playerRejoined', {
