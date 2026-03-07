@@ -260,6 +260,33 @@ const advanceTurn = (gameState) => {
   gameState.turnIndex = nextIndex;
 };
 
+// ── Dice Stack Helpers ──
+
+/**
+ * Create a fresh dice stack for a player's turn
+ */
+const createDiceStack = () => ({
+  values: [],
+  bonusTurns: 0,
+  selectedValue: null,
+  selectedIndex: null
+});
+
+/**
+ * Check if ANY value in the stack has at least one valid move
+ * Returns { hasAnyMoves: bool, movesPerValue: { [index]: moves[] } }
+ */
+const getStackMoveSummary = (gameState, playerId, stackValues) => {
+  const movesPerValue = {};
+  let hasAnyMoves = false;
+  stackValues.forEach((val, idx) => {
+    const moves = getValidMoves(gameState, playerId, val);
+    movesPerValue[idx] = moves;
+    if (moves.length > 0) hasAnyMoves = true;
+  });
+  return { hasAnyMoves, movesPerValue };
+};
+
 const buildPublicGameState = (gameState) => {
   if (!gameState) return null;
   return {
@@ -285,5 +312,7 @@ module.exports = {
   getValidMoves,
   applyMove,
   advanceTurn,
-  buildPublicGameState
+  buildPublicGameState,
+  createDiceStack,
+  getStackMoveSummary
 };
